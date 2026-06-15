@@ -1,7 +1,11 @@
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
 import java.io.*;
 import java.net.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.List;
 import java.util.concurrent.*;
 
 class PeerInfo {
@@ -98,25 +102,25 @@ class PeerGraph {
 class FileTransferManager {
     private static final int CHUNK_SIZE = 1024;
 
-    public static void downloadFile(String fileName, List<PeerInfo> availablePeers, String destFolder) throws Exception {
+    public static void downloadFile(String fileName, List<PeerInfo> availablePeers, String destFolder, JTextArea logArea) throws Exception {
         PriorityQueue<PeerInfo> peerQueue = new PriorityQueue<>(
                 (p1, p2) -> Long.compare(p2.getBandwidth(), p1.getBandwidth())
         );
         peerQueue.addAll(availablePeers);
         PeerInfo bestPeer = peerQueue.poll();
         if (bestPeer == null) {
-            System.out.println("No peer available for download.");
+            appendLog("No peer available for download.", logArea);
             return;
         }
-        System.out.println("Downloading from best peer: " + bestPeer);
+        appendLog("Downloading from best peer: " + bestPeer, logArea);
 
         try (Socket socket = new Socket(bestPeer.getAddress().getAddress(), bestPeer.getAddress().getPort())) {
-            var out = new DataOutputStream(socket.getOutputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             out.writeUTF("GET_SIZE:" + fileName);
-            var in = new DataInputStream(socket.getInputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream());
             long fileSize = in.readLong();
             if (fileSize <= 0) {
-                System.out.println("File not found on peer.");
+                appendLog("File not found on peer.", logArea);
                 return;
             }
             int totalChunks = (int) Math.ceil((double) fileSize / CHUNK_SIZE);
@@ -128,9 +132,9 @@ class FileTransferManager {
                 final int idx = i;
                 executor.submit(() -> {
                     try {
-                        downloadChunk(bestPeer, fileName, idx, chunkMap, receivedChunks);
+                        downloadChunk(bestPeer, fileName, idx, chunkMap, receivedChunks, logArea);
                     } catch (Exception e) {
-                        System.err.println("Chunk " + idx + " download failed: " + e.getMessage());
+                        appendLog("Chunk " + idx + " download failed: " + e.getMessage(), logArea);
                     }
                 });
             }
@@ -144,19 +148,19 @@ class FileTransferManager {
                         fos.write(data);
                     }
                 }
-                System.out.println("File downloaded successfully: " + outputPath);
+                appendLog("File downloaded successfully: " + outputPath, logArea);
             } else {
-                System.out.println("Missing chunks. Download incomplete.");
+                appendLog("Missing chunks. Download incomplete.", logArea);
             }
         }
     }
 
     private static void downloadChunk(PeerInfo peer, String fileName, int index,
-                                      TreeMap<Integer, byte[]> chunkMap, Set<Integer> received) throws Exception {
+                                      TreeMap<Integer, byte[]> chunkMap, Set<Integer> received, JTextArea logArea) throws Exception {
         try (Socket socket = new Socket(peer.getAddress().getAddress(), peer.getAddress().getPort())) {
-            var out = new DataOutputStream(socket.getOutputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             out.writeUTF("GET_CHUNK:" + fileName + ":" + index);
-            var in = new DataInputStream(socket.getInputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream());
             int len = in.readInt();
             if (len > 0) {
                 byte[] data = new byte[len];
@@ -165,8 +169,16 @@ class FileTransferManager {
                     chunkMap.put(index, data);
                     received.add(index);
                 }
-                System.out.println("Chunk " + index + " downloaded.");
+                appendLog("Chunk " + index + " downloaded.", logArea);
             }
+        }
+    }
+
+    private static void appendLog(String msg, JTextArea logArea) {
+        if (logArea != null) {
+            SwingUtilities.invokeLater(() -> logArea.append(msg + "\n"));
+        } else {
+            System.out.println(msg);
         }
     }
 }
@@ -180,10 +192,12 @@ class Peer {
     private Map<String, PeerInfo> peerRegistry;
     private ServerSocket serverSocket;
     private ExecutorService threadPool;
+    private JTextArea logArea;
 
-    public Peer(String peerId, int port) {
+    public Peer(String peerId, int port, JTextArea logArea) {
         this.peerId = peerId;
         this.port = port;
+        this.logArea = logArea;
         this.graph = new PeerGraph();
         this.fileIndex = new ConcurrentHashMap<>();
         this.localFiles = new ConcurrentHashMap<>();
@@ -193,7 +207,7 @@ class Peer {
 
     public void start() throws IOException {
         serverSocket = new ServerSocket(port);
-        System.out.println("Peer " + peerId + " listening on port " + port);
+        appendLog("Peer " + peerId + " listening on port " + port);
         graph.addPeer(peerId);
         peerRegistry.put(peerId, new PeerInfo(peerId, new InetSocketAddress("localhost", port), 1000 + new Random().nextInt(9000)));
         new Thread(() -> {
@@ -209,8 +223,8 @@ class Peer {
     }
 
     private void handleClient(Socket socket) {
-        try (var in = new DataInputStream(socket.getInputStream());
-             var out = new DataOutputStream(socket.getOutputStream())) {
+        try (DataInputStream in = new DataInputStream(socket.getInputStream());
+             DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
             String request = in.readUTF();
             if (request.startsWith("GET_SIZE:")) {
                 String fileName = request.substring(9);
@@ -244,7 +258,7 @@ class Peer {
                 out.writeUTF("OK");
             }
         } catch (Exception e) {
-            System.err.println("Error handling client: " + e.getMessage());
+            appendLog("Error handling client: " + e.getMessage());
         }
     }
 
@@ -290,17 +304,17 @@ class Peer {
         }
         localFiles.put(peerId, files);
         fileIndex.put(peerId, files);
-        System.out.println("Peer " + peerId + " shares " + files.size() + " files.");
+        appendLog("Peer " + peerId + " shares " + files.size() + " files.");
     }
 
     public void joinNetwork(String bootstrapHost, int bootstrapPort) throws IOException {
         try (Socket socket = new Socket(bootstrapHost, bootstrapPort)) {
-            var out = new DataOutputStream(socket.getOutputStream());
-            var in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream());
             out.writeUTF("JOIN:" + peerId + ":" + port + ":" + peerRegistry.get(peerId).getBandwidth());
             String response = in.readUTF();
             if ("OK".equals(response)) {
-                System.out.println("Peer " + peerId + " joined network via bootstrap.");
+                appendLog("Peer " + peerId + " joined network via bootstrap.");
             }
         }
     }
@@ -309,9 +323,9 @@ class Peer {
         Set<String> result = new HashSet<>();
         for (PeerInfo info : peerRegistry.values()) {
             try (Socket socket = new Socket(info.getAddress().getAddress(), info.getAddress().getPort())) {
-                var out = new DataOutputStream(socket.getOutputStream());
+                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                 out.writeUTF("SEARCH:" + fileName);
-                var in = new DataInputStream(socket.getInputStream());
+                DataInputStream in = new DataInputStream(socket.getInputStream());
                 int count = in.readInt();
                 for (int i = 0; i < count; i++) {
                     result.add(in.readUTF());
@@ -324,7 +338,7 @@ class Peer {
     public void downloadFile(String fileName, String destFolder) throws Exception {
         Set<String> peerIds = searchFile(fileName);
         if (peerIds.isEmpty()) {
-            System.out.println("File not found in network.");
+            appendLog("File not found in network.");
             return;
         }
         List<PeerInfo> peers = new ArrayList<>();
@@ -332,50 +346,190 @@ class Peer {
             PeerInfo info = peerRegistry.get(pid);
             if (info != null) peers.add(info);
         }
-        FileTransferManager.downloadFile(fileName, peers, destFolder);
+        FileTransferManager.downloadFile(fileName, peers, destFolder, logArea);
+    }
+
+    private void appendLog(String msg) {
+        if (logArea != null) {
+            SwingUtilities.invokeLater(() -> logArea.append(msg + "\n"));
+        } else {
+            System.out.println(msg);
+        }
     }
 }
 
-public class Main {
+public class Main extends JFrame {
+    private Peer peer;
+    private JTextArea logArea;
+    private JTextField shareFolderField;
+    private JTextField searchField;
+    private DefaultListModel<String> resultModel;
+
+    public Main() {
+        setTitle("P2P File Sharing System");
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setSize(700, 600);
+        setLayout(new BorderLayout());
+
+        JPanel topPanel = new JPanel(new GridLayout(3, 2, 5, 5));
+        topPanel.setBorder(BorderFactory.createTitledBorder("Peer Configuration"));
+
+        JTextField peerIdField = new JTextField("peer1");
+        JTextField portField = new JTextField("9001");
+        shareFolderField = new JTextField("shared_peer1");
+        JButton startButton = new JButton("Start Peer");
+        JButton shareButton = new JButton("Share Folder");
+        JButton joinButton = new JButton("Join Network");
+
+        topPanel.add(new JLabel("Peer ID:"));
+        topPanel.add(peerIdField);
+        topPanel.add(new JLabel("Port:"));
+        topPanel.add(portField);
+        topPanel.add(new JLabel("Share Folder:"));
+        topPanel.add(shareFolderField);
+
+        JPanel buttonPanel = new JPanel();
+        buttonPanel.add(startButton);
+        buttonPanel.add(shareButton);
+        buttonPanel.add(joinButton);
+
+        JPanel centerPanel = new JPanel(new BorderLayout());
+        centerPanel.setBorder(BorderFactory.createTitledBorder("File Search"));
+        JPanel searchPanel = new JPanel(new BorderLayout());
+        searchField = new JTextField();
+        JButton searchButton = new JButton("Search");
+        searchPanel.add(searchField, BorderLayout.CENTER);
+        searchPanel.add(searchButton, BorderLayout.EAST);
+        centerPanel.add(searchPanel, BorderLayout.NORTH);
+
+        resultModel = new DefaultListModel<>();
+        JList<String> resultList = new JList<>(resultModel);
+        resultList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        JScrollPane resultScroll = new JScrollPane(resultList);
+        centerPanel.add(resultScroll, BorderLayout.CENTER);
+
+        JButton downloadButton = new JButton("Download Selected File");
+        centerPanel.add(downloadButton, BorderLayout.SOUTH);
+
+        logArea = new JTextArea();
+        logArea.setEditable(false);
+        JScrollPane logScroll = new JScrollPane(logArea);
+        logScroll.setBorder(BorderFactory.createTitledBorder("Log"));
+
+        add(topPanel, BorderLayout.NORTH);
+        add(buttonPanel, BorderLayout.CENTER);
+        add(centerPanel, BorderLayout.WEST);
+        add(logScroll, BorderLayout.SOUTH);
+
+        startButton.addActionListener(e -> {
+            try {
+                String pid = peerIdField.getText().trim();
+                int p = Integer.parseInt(portField.getText().trim());
+                peer = new Peer(pid, p, logArea);
+                peer.start();
+                logArea.append("Peer started.\n");
+            } catch (Exception ex) {
+                logArea.append("Error: " + ex.getMessage() + "\n");
+            }
+        });
+
+        shareButton.addActionListener(e -> {
+            if (peer == null) {
+                logArea.append("Start peer first.\n");
+                return;
+            }
+            try {
+                peer.shareFolder(shareFolderField.getText().trim());
+            } catch (Exception ex) {
+                logArea.append("Error sharing: " + ex.getMessage() + "\n");
+            }
+        });
+
+        joinButton.addActionListener(e -> {
+            if (peer == null) {
+                logArea.append("Start peer first.\n");
+                return;
+            }
+            try {
+                peer.joinNetwork("localhost", 9000);
+            } catch (Exception ex) {
+                logArea.append("Join error: " + ex.getMessage() + "\n");
+            }
+        });
+
+        searchButton.addActionListener(e -> {
+            if (peer == null) {
+                logArea.append("Start peer first.\n");
+                return;
+            }
+            String file = searchField.getText().trim();
+            if (file.isEmpty()) return;
+            new Thread(() -> {
+                try {
+                    Set<String> peers = peer.searchFile(file);
+                    SwingUtilities.invokeLater(() -> {
+                        resultModel.clear();
+                        if (peers.isEmpty()) {
+                            resultModel.addElement("No peers found.");
+                        } else {
+                            for (String p : peers) {
+                                resultModel.addElement(p);
+                            }
+                        }
+                        logArea.append("Search completed for " + file + "\n");
+                    });
+                } catch (Exception ex) {
+                    logArea.append("Search error: " + ex.getMessage() + "\n");
+                }
+            }).start();
+        });
+
+        downloadButton.addActionListener(e -> {
+            if (peer == null) {
+                logArea.append("Start peer first.\n");
+                return;
+            }
+            String selected = resultList.getSelectedValue();
+            if (selected == null || selected.equals("No peers found.")) {
+                logArea.append("Select a peer from search results.\n");
+                return;
+            }
+            String fileName = searchField.getText().trim();
+            new Thread(() -> {
+                try {
+                    peer.downloadFile(fileName, "downloads");
+                } catch (Exception ex) {
+                    logArea.append("Download error: " + ex.getMessage() + "\n");
+                }
+            }).start();
+        });
+    }
+
     public static void main(String[] args) throws Exception {
         Files.createDirectories(Paths.get("shared_peer1"));
         Files.createDirectories(Paths.get("shared_peer2"));
         Files.createDirectories(Paths.get("shared_peer3"));
         Files.createDirectories(Paths.get("downloads"));
-        System.out.println("Shared folders created.\n");
 
-        Peer bootstrap = new Peer("bootstrap", 9000);
-        bootstrap.start();
+        new Thread(() -> {
+            try {
+                Peer bootstrap = new Peer("bootstrap", 9000, null);
+                bootstrap.start();
+                Peer peer2 = new Peer("peer2", 9002, null);
+                peer2.start();
+                peer2.shareFolder("shared_peer2");
+                peer2.joinNetwork("localhost", 9000);
+                Peer peer3 = new Peer("peer3", 9003, null);
+                peer3.start();
+                peer3.shareFolder("shared_peer3");
+                peer3.joinNetwork("localhost", 9000);
+                String content = "Hello from peer2! This is a test file for P2P transfer.";
+                Files.write(Paths.get("shared_peer2/sample.txt"), content.getBytes());
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }).start();
 
-        Peer peer1 = new Peer("peer1", 9001);
-        Peer peer2 = new Peer("peer2", 9002);
-        Peer peer3 = new Peer("peer3", 9003);
-
-        peer1.start();
-        peer2.start();
-        peer3.start();
-
-        Thread.sleep(1000);
-
-        peer1.shareFolder("shared_peer1");
-        peer2.shareFolder("shared_peer2");
-        peer3.shareFolder("shared_peer3");
-
-        peer1.joinNetwork("localhost", 9000);
-        peer2.joinNetwork("localhost", 9000);
-        peer3.joinNetwork("localhost", 9000);
-
-        String content = "Hello from peer2! This is a test file for P2P transfer.";
-        Files.write(Paths.get("shared_peer2/sample.txt"), content.getBytes());
-        System.out.println("\nSample file 'sample.txt' created in peer2's folder.\n");
-
-        System.out.println("--- Peer1 searching for 'sample.txt' ---");
-        Set<String> found = peer1.searchFile("sample.txt");
-        System.out.println("Found on peers: " + found);
-
-        System.out.println("\n--- Peer1 downloading 'sample.txt' ---");
-        peer1.downloadFile("sample.txt", "downloads");
-
-        System.out.println("\nDone. Check 'downloads/sample.txt'.");
+        SwingUtilities.invokeLater(() -> new Main().setVisible(true));
     }
 }
